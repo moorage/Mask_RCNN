@@ -184,28 +184,27 @@ class NespressoVertuoDataset(utils.Dataset):
             variant_data_copy = np.copy(variant_data)
             variant_data_copy[variant_data_copy != variant_pixel_val] = 0
             variant_data_copy[variant_data_copy == variant_pixel_val] = 1
-            for component_pixel_val_str, component_data in masks_json["component_masks"].items():
+            for component_pixel_val_str, component_mask in masks_json["component_masks"].items():
                 # Filter to only the pixel values where the variants line up
-                if component_data['variant_uri'] == instance['variant_uri']:
+                if component_mask['variant_uri'] == instance['variant_uri']:
                     # Run intersection on this variant with this component
                     component_pixel_val = float(int(component_pixel_val_str))
                     component_data_copy = np.copy(component_data)
+                    component_data_copy_sum_test = (component_data_copy == 106).sum()
                     component_data_copy[component_data_copy != component_pixel_val] = 0
                     component_data_copy[component_data_copy == component_pixel_val] = 1
                     intersected_data = np.bitwise_and(variant_data_copy.astype(np.bool), component_data_copy.astype(np.bool))
                     # intersection actually exists on this one
                     if np.any(intersected_data):
                         masks_bool.append(intersected_data)
-                        component_class_id = NESPRESSO_PART_CLASSES.index(component_data['component_uri']) + 1
+                        component_class_id = NESPRESSO_PART_CLASSES.index(component_mask['component_uri']) + 1
                         class_ids.append(component_class_id)
 
         # Convert generate bitmap masks of all components in the image
         # shape" [height, width, instance_count]
         mask = np.zeros([image_info["height"], image_info["width"], 0], dtype=np.bool)
         if len(masks_bool) > 0:
-            mask = np.stack(masks_bool)
-
-        print("!!!!!!!!!!! Prefix", image_info['prefix'], "found", len(class_ids), "component instances, and resulting mask shape:", mask.shape)
+            mask = np.stack(masks_bool, axis=-1)
 
         return mask, class_ids
 
