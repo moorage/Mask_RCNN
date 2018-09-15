@@ -206,7 +206,7 @@ class NespressoVertuoDataset(utils.Dataset):
         if len(masks_bool) > 0:
             mask = np.stack(masks_bool, axis=-1)
 
-        return mask, class_ids
+        return mask, np.array(class_ids)
 
     def image_reference(self, image_id):
         """Return the path of the image."""
