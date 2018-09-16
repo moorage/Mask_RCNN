@@ -33,8 +33,8 @@ import numpy as np
 import skimage.draw
 import OpenEXR, Imath
 
-# Nespresso part classes
-NESPRESSO_PART_CLASSES = ["User:5649391675244544/nespresso-vertuo-coffee-machine/components/button","User:5649391675244544/nespresso-vertuo-coffee-machine/components/coffee-spout","User:5649391675244544/nespresso-vertuo-coffee-machine/components/cup-platform","User:5649391675244544/nespresso-vertuo-coffee-machine/components/new-capsule-basin","User:5649391675244544/nespresso-vertuo-coffee-machine/components/new-capsule-open-close-latch","User:5649391675244544/nespresso-vertuo-coffee-machine/components/platform-for-water-tank","User:5649391675244544/nespresso-vertuo-coffee-machine/components/used-capsule-basin","User:5649391675244544/nespresso-vertuo-coffee-machine/components/water-tank-basin","User:5649391675244544/nespresso-vertuo-coffee-machine/components/water-tank-lid"]
+COMPONENT_URIS = []
+IS_STEREO_CAMERA = False
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -68,13 +68,14 @@ class NespressoVertuoConfig(Config):
     IMAGES_PER_GPU = 1
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 + len(NESPRESSO_PART_CLASSES)  # Background + components @ http://metaverse.greppy.co/things/5718607623356416
+    NUM_CLASSES = 1 # + len(COMPONENT_URIS) # set dynamically
 
     # Number of training steps per epoch
     STEPS_PER_EPOCH = 100
 
     # Skip detections with < 90% confidence
     DETECTION_MIN_CONFIDENCE = 0.9
+
 
 
 ############################################################
@@ -114,7 +115,7 @@ class NespressoVertuoDataset(utils.Dataset):
         subset: Subset to load: 'training' or 'validation'
         """
         # Add classes wiith their ids for all the components
-        for i, component_uri in enumerate(NESPRESSO_PART_CLASSES):
+        for i, component_uri in enumerate(COMPONENT_URIS):
             self.add_class(NespressoVertuoConfig.NAME, i+1, component_uri)
 
         # Train or validation dataset?
@@ -123,12 +124,15 @@ class NespressoVertuoDataset(utils.Dataset):
 
         # TODO FIXME only doing the left images
         # TODO FIXME not doing depth
+        filename_postfix = ''
+        if IS_STEREO_CAMERA:
+            filename_postfix = '-left'
 
         dataset_prefixes = self.subset_prefixes_list(dataset_dir)
         assert len(dataset_prefixes) > 0
 
         for prefix in dataset_prefixes:
-            image_filename = prefix+'-rgb-left.jpg'
+            image_filename = prefix+'-rgb'+filename_postfix+'.jpg'
             image_path = os.path.join(dataset_dir, image_filename)
             image = skimage.io.imread(image_path)
             height, width = image.shape[:2]
@@ -159,17 +163,23 @@ class NespressoVertuoDataset(utils.Dataset):
         # the json file has the information about all the possible pixels
         masks_json = json.load(open(os.path.join(image_info['prefix_dir'], image_info['prefix']+'-masks.json')))
 
+        # TODO FIXME only doing the left images
+        # TODO FIXME not doing depth
+        filename_postfix = ''
+        if IS_STEREO_CAMERA:
+            filename_postfix = '-left'
+
         variant_data = self.load_exr(
             image_info['prefix_dir'],
             image_info['prefix'],
-            "variantMasks-left",
+            "variantMasks"+filename_postfix,
             image_info['height'],
             image_info['width']
         )
         component_data = self.load_exr(
             image_info['prefix_dir'],
             image_info['prefix'],
-            "componentMasks-left",
+            "componentMasks"+filename_postfix,
             image_info['height'],
             image_info['width']
         )
@@ -179,7 +189,7 @@ class NespressoVertuoDataset(utils.Dataset):
         # instances that are in the scene.
         class_ids = []
         masks_bool = []
-        for variant_pixel_val_str, instance in masks_json["variant_masks"]["pixel_values"].items():
+        for variant_pixel_val_str, instance in masks_json["variants"]["masks_and_poses_by_pixel_value"].items():
             variant_pixel_val = float(int(variant_pixel_val_str))
             variant_data_copy = np.copy(variant_data)
             variant_data_copy[variant_data_copy != variant_pixel_val] = 0
@@ -197,7 +207,7 @@ class NespressoVertuoDataset(utils.Dataset):
                     # intersection actually exists on this one
                     if np.any(intersected_data):
                         masks_bool.append(intersected_data)
-                        component_class_id = NESPRESSO_PART_CLASSES.index(component_mask['component_uri']) + 1
+                        component_class_id = COMPONENT_URIS.index(component_mask['component_uri']) + 1
                         class_ids.append(component_class_id)
 
         # Convert generate bitmap masks of all components in the image
@@ -338,16 +348,26 @@ if __name__ == '__main__':
     print("Dataset: ", args.dataset)
     print("Logs: ", args.logs)
 
+    # Setup component classes
+    dataset_dict = json.load(open(os.path.join(args.dataset, '_dataset.json')))
+    COMPONENT_URIS = dataset_dict['component_uris']
+    IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
+    print("len(COMPONENT_URIS): ", len(COMPONENT_URIS))
+
     # Configurations
     if args.command == "train":
-        config = NespressoVertuoConfig()
+        class TrainingConfig(NespressoVertuoConfig):
+            NUM_CLASSES = 1 + len(COMPONENT_URIS)
+        config = TrainingConfig()
     else:
         class InferenceConfig(NespressoVertuoConfig):
             # Set batch size to 1 since we'll be running inference on
             # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
+            NUM_CLASSES = 1 + len(COMPONENT_URIS)
         config = InferenceConfig()
+    assert config.NUM_CLASSES, 1 + len(COMPONENT_URIS)
     config.display()
 
     # Create model
