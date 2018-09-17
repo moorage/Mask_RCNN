@@ -445,15 +445,6 @@ if __name__ == '__main__':
     else:
         weights_path = args.weights
 
-
-    # import h5py
-    # from keras.utils import plot_model
-    # model.load_weights(weights_path, by_name=True, exclude=[
-    #     "mrcnn_class_logits", "mrcnn_bbox_fc",
-    #     "mrcnn_bbox", "mrcnn_mask", "zero_padding2d_1"])
-    # plot_model(model.keras_model, to_file='model.png')
-    # raise SystemExit
-
     # Load weights
     print("Loading weights ", weights_path)
     if args.weights.lower() == "coco":
@@ -465,7 +456,7 @@ if __name__ == '__main__':
             # Since you're changing the shape of the input, the shape of the first Conv layer will change as well
             model.load_weights(weights_path, by_name=True, exclude=[
                 "mrcnn_class_logits", "mrcnn_bbox_fc",
-                "mrcnn_bbox", "mrcnn_mask", "zero_padding2d_1", "conv1", "bn_conv1", "activation_1", "max_pooling2d_1"])
+                "mrcnn_bbox", "mrcnn_mask", "conv1"])
         else:
             model.load_weights(weights_path, by_name=True, exclude=[
                 "mrcnn_class_logits", "mrcnn_bbox_fc",
