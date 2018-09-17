@@ -35,6 +35,7 @@ import OpenEXR, Imath
 
 COMPONENT_URIS = []
 IS_STEREO_CAMERA = False
+IS_USING_DEPTH_CHANNEL = False
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -83,6 +84,44 @@ class NespressoVertuoConfig(Config):
 ############################################################
 
 class NespressoVertuoDataset(utils.Dataset):
+
+    def load_image(self, image_id):
+        # If image is not from this dataset, delegate to parent class.
+        image_info = self.image_info[image_id]
+        if image_info["source"] != NespressoVertuoConfig.NAME:
+            return super(self.__class__, self).load_image(image_id)
+        # Nothng special unless we're using the depth channel
+        if not IS_USING_DEPTH_CHANNEL:
+            return super(self.__class__, self).load_image(image_id)
+        # Otherwise load as rgb & load depth, return a [H,W,4] Numpy array
+        # Load image
+        image = skimage.io.imread(image_info['path'])
+        # If has an alpha channel, remove it.  We're going to add depth as 4
+        if image.shape[-1] == 4:
+            image = image[..., :3]
+        # TODO FIXME normalize depth more globally?
+        filename_postfix = ''
+        if IS_STEREO_CAMERA:
+            filename_postfix = '-left'
+        depth_data = self.load_exr(
+            image_info['prefix_dir'],
+            image_info['prefix'],
+            "depth"+filename_postfix,
+            image_info['height'],
+            image_info['width']
+        )
+        # normalize between 0 and 255 range for depth
+        # FIXME TODO what's the best way to handle inf depth values?
+        max_depth = np.nanmax(depth_data[depth_data != np.inf])
+        if np.isinf(depth_data).any():
+            print("[WARN]",image_info['prefix'],"depth image has some 'inf' values, changing to 2x the max", flush=True)
+            depth_data[depth_data == np.inf] = 2.0 * max_depth
+        depth_data /= max_depth/255.0
+        depth_data = depth_data.round()
+        channels = [image[..., 0], image[..., 1], image[..., 2], depth_data.astype(np.uint8)]
+        depth_image = np.stack(channels, axis=-1)
+        return depth_image
+
 
     def subset_prefixes_list(self, dataset_dir):
         print("Loading dataset ", dataset_dir)
@@ -246,11 +285,11 @@ def train(model, dataset):
     # Since we're using a very small dataset, and starting from
     # COCO trained weights, we don't need to train too long. Also,
     # no need to train all layers, just the heads should do it.
-    print("Training network heads")
+    print("Training network")
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,
                 epochs=30,
-                layers='heads')
+                layers='all') # can't just train because we can't transfer learn
 
 
 ############################################################
@@ -322,6 +361,11 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', required=False,
                         metavar="/path/to/generated/dataset/",
                         help='Directory of the generated dataset')
+    parser.add_argument('--traindepth', dest='train_depth', action='store_true',
+                        help="Enable depth training (default: does not train depth)")
+    parser.add_argument('--no-traindepth', dest='train_depth', action='store_false',
+                        help="Definitely don't do depth training (default: does not train depth)")
+    parser.set_defaults(train_depth=False)
     parser.add_argument('--weights', required=True,
                         metavar="/path/to/weights.h5",
                         help="Path to weights .h5 file or 'coco'")
@@ -347,6 +391,8 @@ if __name__ == '__main__':
     print("Weights: ", args.weights)
     print("Dataset: ", args.dataset)
     print("Logs: ", args.logs)
+    if args.command == "train":
+        print("Train Depth:", args.train_depth)
 
     # Setup component classes
     dataset_dict = json.load(open(os.path.join(args.dataset, '_dataset.json')))
@@ -356,16 +402,22 @@ if __name__ == '__main__':
 
     # Configurations
     if args.command == "train":
+        IS_USING_DEPTH_CHANNEL = args.train_depth
         class TrainingConfig(NespressoVertuoConfig):
             NUM_CLASSES = 1 + len(COMPONENT_URIS)
+            IMAGE_CHANNEL_COUNT = 4 if args.train_depth else 3 # depth or RGB
+            MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if args.train_depth else np.array([123.7, 116.8, 103.9])
         config = TrainingConfig()
     else:
+        IS_USING_DEPTH_CHANNEL = args.depth and true
         class InferenceConfig(NespressoVertuoConfig):
             # Set batch size to 1 since we'll be running inference on
             # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
             NUM_CLASSES = 1 + len(COMPONENT_URIS)
+            IMAGE_CHANNEL_COUNT = 4 if args.depth else 3 # depth or RGB
+            MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if args.train_depth else np.array([123.7, 116.8, 103.9])
         config = InferenceConfig()
     assert config.NUM_CLASSES, 1 + len(COMPONENT_URIS)
     config.display()
@@ -393,14 +445,31 @@ if __name__ == '__main__':
     else:
         weights_path = args.weights
 
+
+    # import h5py
+    # from keras.utils import plot_model
+    # model.load_weights(weights_path, by_name=True, exclude=[
+    #     "mrcnn_class_logits", "mrcnn_bbox_fc",
+    #     "mrcnn_bbox", "mrcnn_mask", "zero_padding2d_1"])
+    # plot_model(model.keras_model, to_file='model.png')
+    # raise SystemExit
+
     # Load weights
     print("Loading weights ", weights_path)
     if args.weights.lower() == "coco":
+
         # Exclude the last layers because they require a matching
         # number of classes
-        model.load_weights(weights_path, by_name=True, exclude=[
-            "mrcnn_class_logits", "mrcnn_bbox_fc",
-            "mrcnn_bbox", "mrcnn_mask"])
+        if IS_USING_DEPTH_CHANNEL:
+            # Exclude the first layer too because we've changed the shape of the input:
+            # Since you're changing the shape of the input, the shape of the first Conv layer will change as well
+            model.load_weights(weights_path, by_name=True, exclude=[
+                "mrcnn_class_logits", "mrcnn_bbox_fc",
+                "mrcnn_bbox", "mrcnn_mask", "zero_padding2d_1", "conv1", "bn_conv1", "activation_1", "max_pooling2d_1"])
+        else:
+            model.load_weights(weights_path, by_name=True, exclude=[
+                "mrcnn_class_logits", "mrcnn_bbox_fc",
+                "mrcnn_bbox", "mrcnn_mask"])
     else:
         model.load_weights(weights_path, by_name=True)
 
