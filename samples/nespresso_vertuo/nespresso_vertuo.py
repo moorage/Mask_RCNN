@@ -96,7 +96,7 @@ class NespressoVertuoDataset(utils.Dataset):
         # Otherwise load as rgb & load depth, return a [H,W,4] Numpy array
         # Load image
         image = skimage.io.imread(image_info['path'])
-        # If has an alpha channel, remove it.  We're going to add depth as 4
+        # If has an alpha channel, remove it.  We're going to add depth as 4th
         if image.shape[-1] == 4:
             image = image[..., :3]
         # TODO FIXME normalize depth more globally?
@@ -110,15 +110,12 @@ class NespressoVertuoDataset(utils.Dataset):
             image_info['height'],
             image_info['width']
         )
-        # normalize between 0 and 255 range for depth
         # FIXME TODO what's the best way to handle inf depth values?
         max_depth = np.nanmax(depth_data[depth_data != np.inf])
         if np.isinf(depth_data).any():
-            print("[WARN]",image_info['prefix'],"depth image has some 'inf' values, changing to 2x the max", flush=True)
-            depth_data[depth_data == np.inf] = 2.0 * max_depth
-        depth_data /= max_depth/255.0
-        depth_data = depth_data.round()
-        channels = [image[..., 0], image[..., 1], image[..., 2], depth_data.astype(np.uint8)]
+            print("[WARN]",image_info['prefix'],"depth image has some 'inf' values, setting to -1", flush=True)
+            depth_data[depth_data == np.inf] = -1
+        channels = [image[..., 0].astype(np.float32), image[..., 1].astype(np.float32), image[..., 2].astype(np.float32), depth_data.astype(np.float32)]
         depth_image = np.stack(channels, axis=-1)
         return depth_image
 
