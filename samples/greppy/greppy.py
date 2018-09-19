@@ -12,16 +12,16 @@ Usage: import the module (see Jupyter notebooks for examples), or run from
        the command line as such:
 
     # Train a new model starting from pre-trained COCO weights
-    python3 nespresso_vertuo.py train --dataset=/path/to/balloon/dataset --weights=coco
+    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=coco --traindepth
 
     # Resume training a model that you had trained earlier
-    python3 nespresso_vertuo.py train --dataset=/path/to/balloon/dataset --weights=last
+    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=last --traindepth
 
     # Train a new model starting from ImageNet weights
-    python3 nespresso_vertuo.py train --dataset=/path/to/balloon/dataset --weights=imagenet
+    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=imagenet --traindepth
 
     # Run inference on an image
-    python3 nespresso_vertuo.py infer --weights=/path/to/weights/file.h5 --image=<URL or path to file> --depth=<URL or path to file>
+    python3 greppy.py infer --weights=/path/to/weights/file.h5 --image=<URL or path to file> --depth=<URL or path to file>
 """
 
 import os
@@ -32,10 +32,6 @@ import datetime
 import numpy as np
 import skimage.draw
 import OpenEXR, Imath
-
-COMPONENT_URIS = []
-IS_STEREO_CAMERA = False
-IS_USING_DEPTH_CHANNEL = False
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -56,20 +52,23 @@ DEFAULT_LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 #  Configurations
 ############################################################
 
-
-class NespressoVertuoConfig(Config):
+class GreppyConfig(Config):
     """Configuration for training on the Nespresso dataset.
     Derives from the base Config class and overrides some values.
     """
     # Give the configuration a recognizable name
-    NAME = "nespresso_vertuo"
+    NAME = "greppy"
+
+    # Override if not using depth
+    MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0])
+    IMAGE_CHANNEL_COUNT = 4 # override to 3 for non-depth
 
     # We use a GPU with 12GB memory, which can fit two images.
     # Adjust down if you use a smaller GPU.
     IMAGES_PER_GPU = 1
 
     # Number of classes (including background)
-    NUM_CLASSES = 1 # + len(COMPONENT_URIS) # set dynamically
+    NUM_CLASSES = 1 # Override from the _dataset.json file
 
     # Number of training steps per epoch
     STEPS_PER_EPOCH = 100
@@ -77,21 +76,43 @@ class NespressoVertuoConfig(Config):
     # Skip detections with < 90% confidence
     DETECTION_MIN_CONFIDENCE = 0.9
 
+    # Equivalent of classnames, loaded from the _dataset.json file
+    COMPONENT_URIS = [] # Override from the _dataset.json file
+    IS_STEREO_CAMERA = False # Override from the _dataset.json file
+    # def init_from_dataset_dir(self, dataset_dir):
+    #     dataset_dict = json.load(open(os.path.join(dataset_dir, '_dataset.json')))
+    #     self.__class__.COMPONENT_URIS = dataset_dict['component_uris']
+    #     self.__class__.NUM_CLASSES = 1 + len(dataset_dict['component_uris'])
+    #     self.__class__.IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
 
 
 ############################################################
 #  Dataset
 ############################################################
 
-class NespressoVertuoDataset(utils.Dataset):
+class GreppyDataset(utils.Dataset):
+
+    # Subclass to turn this off
+    USE_DEPTH_CHANNEL = True
+
+    # Equivalent of classnames, loaded from the _dataset.json file
+    COMPONENT_URIS = []
+    COMPONENT_URIS_INITED = False
+    IS_STEREO_CAMERA = False
+    def init_from_dataset_dir(self, dataset_dir):
+        if not self.__class__.COMPONENT_URIS_INITED:
+            self.__class__.COMPONENT_URIS_INITED = True
+            dataset_dict = json.load(open(os.path.join(dataset_dir, '_dataset.json')))
+            self.__class__.COMPONENT_URIS = dataset_dict['component_uris']
+            self.__class__.IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
 
     def load_image(self, image_id):
         # If image is not from this dataset, delegate to parent class.
         image_info = self.image_info[image_id]
-        if image_info["source"] != NespressoVertuoConfig.NAME:
+        if image_info["source"] != GreppyConfig.NAME:
             return super(self.__class__, self).load_image(image_id)
         # Nothng special unless we're using the depth channel
-        if not IS_USING_DEPTH_CHANNEL:
+        if not self.__class__.USE_DEPTH_CHANNEL:
             return super(self.__class__, self).load_image(image_id)
         # Otherwise load as rgb & load depth, return a [H,W,4] Numpy array
         # Load image
@@ -101,7 +122,7 @@ class NespressoVertuoDataset(utils.Dataset):
             image = image[..., :3]
         # TODO FIXME normalize depth more globally?
         filename_postfix = ''
-        if IS_STEREO_CAMERA:
+        if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
         depth_data = self.load_exr(
             image_info['prefix_dir'],
@@ -150,9 +171,11 @@ class NespressoVertuoDataset(utils.Dataset):
         dataset_dir: Root directory of the dataset.
         subset: Subset to load: 'training' or 'validation'
         """
+        self.init_from_dataset_dir(dataset_dir)
+
         # Add classes wiith their ids for all the components
-        for i, component_uri in enumerate(COMPONENT_URIS):
-            self.add_class(NespressoVertuoConfig.NAME, i+1, component_uri)
+        for i, component_uri in enumerate(self.__class__.COMPONENT_URIS):
+            self.add_class(GreppyConfig.NAME, i+1, component_uri)
 
         # Train or validation dataset?
         assert subset in ["training", "validation"]
@@ -161,7 +184,7 @@ class NespressoVertuoDataset(utils.Dataset):
         # TODO FIXME only doing the left images
         # TODO FIXME not doing depth
         filename_postfix = ''
-        if IS_STEREO_CAMERA:
+        if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
 
         dataset_prefixes = self.subset_prefixes_list(dataset_dir)
@@ -174,7 +197,7 @@ class NespressoVertuoDataset(utils.Dataset):
             height, width = image.shape[:2]
 
             self.add_image(
-                NespressoVertuoConfig.NAME,
+                GreppyConfig.NAME,
                 image_id=image_filename,  # use file name as a unique image id
                 path=image_path,
                 width=width,
@@ -193,7 +216,7 @@ class NespressoVertuoDataset(utils.Dataset):
         """
         # If image is not from this dataset, delegate to parent class.
         image_info = self.image_info[image_id]
-        if image_info["source"] != NespressoVertuoConfig.NAME:
+        if image_info["source"] != GreppyConfig.NAME:
             return super(self.__class__, self).load_mask(image_id)
 
         # the json file has the information about all the possible pixels
@@ -202,7 +225,7 @@ class NespressoVertuoDataset(utils.Dataset):
         # TODO FIXME only doing the left images
         # TODO FIXME not doing depth
         filename_postfix = ''
-        if IS_STEREO_CAMERA:
+        if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
 
         variant_data = self.load_exr(
@@ -243,7 +266,7 @@ class NespressoVertuoDataset(utils.Dataset):
                     # intersection actually exists on this one
                     if np.any(intersected_data):
                         masks_bool.append(intersected_data)
-                        component_class_id = COMPONENT_URIS.index(component_mask['component_uri']) + 1
+                        component_class_id = self.__class__.COMPONENT_URIS.index(component_mask['component_uri']) + 1
                         class_ids.append(component_class_id)
 
         # Convert generate bitmap masks of all components in the image
@@ -257,7 +280,7 @@ class NespressoVertuoDataset(utils.Dataset):
     def image_reference(self, image_id):
         """Return the path of the image."""
         info = self.image_info[image_id]
-        if info["source"] == NespressoVertuoConfig.NAME:
+        if info["source"] == GreppyConfig.NAME:
             return info["path"]
         else:
             super(self.__class__, self).image_reference(image_id)
@@ -269,12 +292,12 @@ class NespressoVertuoDataset(utils.Dataset):
 def train(model, dataset):
     """Train the model."""
     # Training dataset.
-    dataset_train = NespressoVertuoDataset()
+    dataset_train = GreppyDataset()
     dataset_train.load_subset(dataset, "training")
     dataset_train.prepare()
 
     # Validation dataset
-    dataset_val = NespressoVertuoDataset()
+    dataset_val = GreppyDataset()
     dataset_val.load_subset(dataset, "validation")
     dataset_val.prepare()
 
@@ -318,7 +341,7 @@ def detect_and_infer_depth(model, dataset_dir, image_path=None, depth_path=None)
     # Run model detection and generate the color splash effect
     print("Running on {} with dataset {}".format(image_path, dataset_dir))
 
-    dataset = NespressoVertuoDataset()
+    dataset = GreppyDataset()
     dataset.load_subset(dataset_dir, "validation")
     dataset.prepare()
 
@@ -391,32 +414,32 @@ if __name__ == '__main__':
     if args.command == "train":
         print("Train Depth:", args.train_depth)
 
-    # Setup component classes
-    dataset_dict = json.load(open(os.path.join(args.dataset, '_dataset.json')))
-    COMPONENT_URIS = dataset_dict['component_uris']
-    IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
-    print("len(COMPONENT_URIS): ", len(COMPONENT_URIS))
-
     # Configurations
+    dataset_dict = json.load(open(os.path.join(args.dataset, '_dataset.json')))
+    use_depth = True
     if args.command == "train":
-        IS_USING_DEPTH_CHANNEL = args.train_depth
-        class TrainingConfig(NespressoVertuoConfig):
-            NUM_CLASSES = 1 + len(COMPONENT_URIS)
-            IMAGE_CHANNEL_COUNT = 4 if args.train_depth else 3 # depth or RGB
-            MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if args.train_depth else np.array([123.7, 116.8, 103.9])
+        use_depth = args.train_depth
+        class TrainingConfig(GreppyConfig):
+            IMAGE_CHANNEL_COUNT = 4 if use_depth else 3 # depth or RGB
+            MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if use_depth else np.array([123.7, 116.8, 103.9])
+            COMPONENT_URIS = dataset_dict['component_uris']
+            NUM_CLASSES = 1 + len(dataset_dict['component_uris'])
+            IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
         config = TrainingConfig()
     else:
-        IS_USING_DEPTH_CHANNEL = args.depth and true
-        class InferenceConfig(NespressoVertuoConfig):
+        use_depth = args.depth
+        class InferenceConfig(GreppyConfig):
             # Set batch size to 1 since we'll be running inference on
             # one image at a time. Batch size = GPU_COUNT * IMAGES_PER_GPU
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
-            NUM_CLASSES = 1 + len(COMPONENT_URIS)
-            IMAGE_CHANNEL_COUNT = 4 if args.depth else 3 # depth or RGB
-            MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if args.train_depth else np.array([123.7, 116.8, 103.9])
+            IMAGE_CHANNEL_COUNT = 4 if use_depth else 3 # depth or RGB
+            MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if use_depth and true else np.array([123.7, 116.8, 103.9])
+            COMPONENT_URIS = dataset_dict['component_uris']
+            NUM_CLASSES = 1 + len(dataset_dict['component_uris'])
+            IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
         config = InferenceConfig()
-    assert config.NUM_CLASSES, 1 + len(COMPONENT_URIS)
+    assert config.NUM_CLASSES, 1 + len(config.COMPONENT_URIS)
     config.display()
 
     # Create model
@@ -445,10 +468,9 @@ if __name__ == '__main__':
     # Load weights
     print("Loading weights ", weights_path)
     if args.weights.lower() == "coco":
-
         # Exclude the last layers because they require a matching
         # number of classes
-        if IS_USING_DEPTH_CHANNEL:
+        if use_depth:
             # Exclude the first layer too because we've changed the shape of the input:
             # Since you're changing the shape of the input, the shape of the first Conv layer will change as well
             model.load_weights(weights_path, by_name=True, exclude=[
