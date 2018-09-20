@@ -184,11 +184,11 @@ class GreppyDataset(utils.Dataset):
         if self.__class__.SHOULD_TRAIN_VARIANTS_NOT_COMPONENTS:
             # Add classes with their ids for all the variants
             for i, variant_uri in enumerate(self.__class__.VARIANT_URIS):
-                self.add_class(GreppyConfig.NAME, i+1, variant_uri)
+                self.add_class(GreppyConfig.NAME, i, variant_uri)
         else:
             # Add classes with their ids for all the components
             for i, component_uri in enumerate(self.__class__.COMPONENT_URIS):
-                self.add_class(GreppyConfig.NAME, i+1, component_uri)
+                self.add_class(GreppyConfig.NAME, i, component_uri)
 
         # Train or validation dataset?
         assert subset in ["training", "validation"]
@@ -268,7 +268,7 @@ class GreppyDataset(utils.Dataset):
                 variant_data_copy[variant_data_copy == variant_pixel_val] = 1
                 if np.any(variant_data_copy):
                     masks_bool.append(variant_data_copy.astype(np.bool))
-                    variant_class_id = self.__class__.VARIANT_URIS.index(instance['variant_uri']) + 1 # 1 for background offset
+                    variant_class_id = self.__class__.VARIANT_URIS.index(instance['variant_uri'])
                     class_ids.append(variant_class_id)
         else:
             for variant_pixel_val_str, instance in masks_json["variants"]["masks_and_poses_by_pixel_value"].items():
@@ -289,7 +289,7 @@ class GreppyDataset(utils.Dataset):
                         # intersection actually exists on this one
                         if np.any(intersected_data):
                             masks_bool.append(intersected_data)
-                            component_class_id = self.__class__.COMPONENT_URIS.index(component_mask['component_uri']) + 1 # 1 for background offset
+                            component_class_id = self.__class__.COMPONENT_URIS.index(component_mask['component_uri'])
                             class_ids.append(component_class_id)
 
         # Convert generate bitmap masks of all components in the image
