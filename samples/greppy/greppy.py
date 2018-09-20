@@ -120,7 +120,6 @@ class GreppyDataset(utils.Dataset):
         # If has an alpha channel, remove it.  We're going to add depth as 4th
         if image.shape[-1] == 4:
             image = image[..., :3]
-        # TODO FIXME normalize depth more globally?
         filename_postfix = ''
         if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
@@ -182,7 +181,6 @@ class GreppyDataset(utils.Dataset):
         dataset_dir = os.path.join(dataset_dir, subset)
 
         # TODO FIXME only doing the left images
-        # TODO FIXME not doing depth
         filename_postfix = ''
         if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
@@ -223,7 +221,6 @@ class GreppyDataset(utils.Dataset):
         masks_json = json.load(open(os.path.join(image_info['prefix_dir'], image_info['prefix']+'-masks.json')))
 
         # TODO FIXME only doing the left images
-        # TODO FIXME not doing depth
         filename_postfix = ''
         if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
