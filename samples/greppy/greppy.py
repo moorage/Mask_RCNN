@@ -12,16 +12,16 @@ Usage: import the module (see Jupyter notebooks for examples), or run from
        the command line as such:
 
     # Train a new model starting from pre-trained COCO weights
-    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=coco --traindepth
+    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=coco --traindepth --variantsnotcomponents
 
     # Resume training a model that you had trained earlier
-    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=last --traindepth
+    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=last --traindepth --variantsnotcomponents
 
     # Train a new model starting from ImageNet weights
-    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=imagenet --traindepth
+    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=imagenet --traindepth --variantsnotcomponents
 
     # Run inference on an image
-    python3 greppy.py infer --weights=/path/to/weights/file.h5 --image=<URL or path to file> --depth=<URL or path to file>
+    python3 greppy.py infer --weights=/path/to/weights/file.h5 --image=<URL or path to file> --depth=<URL or path to file> --variantsnotcomponents
 """
 
 import os
@@ -59,6 +59,9 @@ class GreppyConfig(Config):
     # Give the configuration a recognizable name
     NAME = "greppy"
 
+    # Subclass/override to turn this off
+    TRAINED_ON_VARIANTS_NOT_COMPONENTS = False
+
     # Override if not using depth
     MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0])
     IMAGE_CHANNEL_COUNT = 4 # override to 3 for non-depth
@@ -78,6 +81,7 @@ class GreppyConfig(Config):
 
     # Equivalent of classnames, loaded from the _dataset.json file
     COMPONENT_URIS = [] # Override from the _dataset.json file
+    VARIANT_URIS = [] # Override from the _dataset.json file
     IS_STEREO_CAMERA = False # Override from the _dataset.json file
     # def init_from_dataset_dir(self, dataset_dir):
     #     dataset_dict = json.load(open(os.path.join(dataset_dir, '_dataset.json')))
@@ -95,8 +99,12 @@ class GreppyDataset(utils.Dataset):
     # Subclass to turn this off
     USE_DEPTH_CHANNEL = True
 
+    # Subclass to turn this off
+    SHOULD_TRAIN_VARIANTS_NOT_COMPONENTS = False
+
     # Equivalent of classnames, loaded from the _dataset.json file
     COMPONENT_URIS = []
+    VARIANT_URIS = []
     COMPONENT_URIS_INITED = False
     IS_STEREO_CAMERA = False
     def init_from_dataset_dir(self, dataset_dir):
@@ -104,6 +112,7 @@ class GreppyDataset(utils.Dataset):
             self.__class__.COMPONENT_URIS_INITED = True
             dataset_dict = json.load(open(os.path.join(dataset_dir, '_dataset.json')))
             self.__class__.COMPONENT_URIS = dataset_dict['component_uris']
+            self.__class__.VARIANT_URIS = dataset_dict['variant_uris']
             self.__class__.IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
 
     def load_image(self, image_id):
@@ -133,8 +142,8 @@ class GreppyDataset(utils.Dataset):
         # FIXME TODO what's the best way to handle inf depth values?
         max_depth = np.nanmax(depth_data[depth_data != np.inf])
         if np.isinf(depth_data).any():
-            print("[WARN]",image_info['prefix'],"depth image has some 'inf' values, setting to -1", flush=True)
-            depth_data[depth_data == np.inf] = -1
+            print("[WARN]",image_info['prefix'],"depth image has some 'inf' values, setting to 0, which depth cameras seem to do", flush=True)
+            depth_data[depth_data == np.inf] = 0
         channels = [image[..., 0].astype(np.float32), image[..., 1].astype(np.float32), image[..., 2].astype(np.float32), depth_data.astype(np.float32)]
         depth_image = np.stack(channels, axis=-1)
         return depth_image
@@ -172,9 +181,14 @@ class GreppyDataset(utils.Dataset):
         """
         self.init_from_dataset_dir(dataset_dir)
 
-        # Add classes wiith their ids for all the components
-        for i, component_uri in enumerate(self.__class__.COMPONENT_URIS):
-            self.add_class(GreppyConfig.NAME, i+1, component_uri)
+        if self.__class__.SHOULD_TRAIN_VARIANTS_NOT_COMPONENTS:
+            # Add classes with their ids for all the variants
+            for i, variant_uri in enumerate(self.__class__.VARIANT_URIS):
+                self.add_class(GreppyConfig.NAME, i+1, variant_uri)
+        else:
+            # Add classes with their ids for all the components
+            for i, component_uri in enumerate(self.__class__.COMPONENT_URIS):
+                self.add_class(GreppyConfig.NAME, i+1, component_uri)
 
         # Train or validation dataset?
         assert subset in ["training", "validation"]
@@ -240,31 +254,43 @@ class GreppyDataset(utils.Dataset):
             image_info['width']
         )
 
-        # For each variant in the scene, for each component of it, we might have an instance
-        # Or, you might not (it could be "not in view" for this variant).  Loop and only add the variant
-        # instances that are in the scene.
+        # If training variants: fetch each mask separately and add its class
+        # If training components: For each variant in the scene, for each component of it, we might have an instance
+        #   Or, you might not have an instance because it could be "not in view" for this variant.
+        #   Loop and only add the variant instances that are in the scene.
         class_ids = []
         masks_bool = []
-        for variant_pixel_val_str, instance in masks_json["variants"]["masks_and_poses_by_pixel_value"].items():
-            variant_pixel_val = float(int(variant_pixel_val_str))
-            variant_data_copy = np.copy(variant_data)
-            variant_data_copy[variant_data_copy != variant_pixel_val] = 0
-            variant_data_copy[variant_data_copy == variant_pixel_val] = 1
-            for component_pixel_val_str, component_mask in masks_json["component_masks"].items():
-                # Filter to only the pixel values where the variants line up
-                if component_mask['variant_uri'] == instance['variant_uri']:
-                    # Run intersection on this variant with this component
-                    component_pixel_val = float(int(component_pixel_val_str))
-                    component_data_copy = np.copy(component_data)
-                    component_data_copy_sum_test = (component_data_copy == 106).sum()
-                    component_data_copy[component_data_copy != component_pixel_val] = 0
-                    component_data_copy[component_data_copy == component_pixel_val] = 1
-                    intersected_data = np.bitwise_and(variant_data_copy.astype(np.bool), component_data_copy.astype(np.bool))
-                    # intersection actually exists on this one
-                    if np.any(intersected_data):
-                        masks_bool.append(intersected_data)
-                        component_class_id = self.__class__.COMPONENT_URIS.index(component_mask['component_uri']) + 1
-                        class_ids.append(component_class_id)
+        if self.__class__.SHOULD_TRAIN_VARIANTS_NOT_COMPONENTS:
+            for variant_pixel_val_str, instance in masks_json["variants"]["masks_and_poses_by_pixel_value"].items():
+                variant_pixel_val = float(int(variant_pixel_val_str))
+                variant_data_copy = np.copy(variant_data)
+                variant_data_copy[variant_data_copy != variant_pixel_val] = 0
+                variant_data_copy[variant_data_copy == variant_pixel_val] = 1
+                if np.any(variant_data_copy):
+                    masks_bool.append(variant_data_copy.astype(np.bool))
+                    variant_class_id = self.__class__.VARIANT_URIS.index(instance['variant_uri']) + 1 # 1 for background offset
+                    class_ids.append(variant_class_id)
+        else:
+            for variant_pixel_val_str, instance in masks_json["variants"]["masks_and_poses_by_pixel_value"].items():
+                variant_pixel_val = float(int(variant_pixel_val_str))
+                variant_data_copy = np.copy(variant_data)
+                variant_data_copy[variant_data_copy != variant_pixel_val] = 0
+                variant_data_copy[variant_data_copy == variant_pixel_val] = 1
+                for component_pixel_val_str, component_mask in masks_json["component_masks"].items():
+                    # Filter to only the pixel values where the variants line up
+                    if component_mask['variant_uri'] == instance['variant_uri']:
+                        # Run intersection on this variant with this component
+                        component_pixel_val = float(int(component_pixel_val_str))
+                        component_data_copy = np.copy(component_data)
+                        component_data_copy_sum_test = (component_data_copy == 106).sum()
+                        component_data_copy[component_data_copy != component_pixel_val] = 0
+                        component_data_copy[component_data_copy == component_pixel_val] = 1
+                        intersected_data = np.bitwise_and(variant_data_copy.astype(np.bool), component_data_copy.astype(np.bool))
+                        # intersection actually exists on this one
+                        if np.any(intersected_data):
+                            masks_bool.append(intersected_data)
+                            component_class_id = self.__class__.COMPONENT_URIS.index(component_mask['component_uri']) + 1 # 1 for background offset
+                            class_ids.append(component_class_id)
 
         # Convert generate bitmap masks of all components in the image
         # shape" [height, width, instance_count]
@@ -286,15 +312,18 @@ class GreppyDataset(utils.Dataset):
 ############################################################
 #  Training
 ############################################################
-def train(model, dataset):
+def train(model, dataset, variants_not_components):
     """Train the model."""
+    class VariantsOrNotGreppyDataset(GreppyDataset):
+        SHOULD_TRAIN_VARIANTS_NOT_COMPONENTS = variants_not_components
+
     # Training dataset.
-    dataset_train = GreppyDataset()
+    dataset_train = VariantsOrNotGreppyDataset()
     dataset_train.load_subset(dataset, "training")
     dataset_train.prepare()
 
     # Validation dataset
-    dataset_val = GreppyDataset()
+    dataset_val = VariantsOrNotGreppyDataset()
     dataset_val.load_subset(dataset, "validation")
     dataset_val.prepare()
 
@@ -383,6 +412,11 @@ if __name__ == '__main__':
     parser.add_argument('--no-traindepth', dest='train_depth', action='store_false',
                         help="Definitely don't do depth training (default: does not train depth)")
     parser.set_defaults(train_depth=False)
+    parser.add_argument('--variantsnotcomponents', dest='variants_not_components', action='store_true',
+        help="Enable variants training rather than components (default: use components not variants)")
+    parser.add_argument('--componentsnotvariants', dest='variants_not_components', action='store_false',
+        help="Enable components training rather than variants (default: use components not variants)")
+    parser.set_defaults(variants_not_components=False)
     parser.add_argument('--weights', required=True,
                         metavar="/path/to/weights.h5",
                         help="Path to weights .h5 file or 'coco'")
@@ -408,6 +442,7 @@ if __name__ == '__main__':
     print("Weights: ", args.weights)
     print("Dataset: ", args.dataset)
     print("Logs: ", args.logs)
+    print("Variants rather than Components: ", args.variants_not_components)
     if args.command == "train":
         print("Train Depth:", args.train_depth)
 
@@ -418,9 +453,11 @@ if __name__ == '__main__':
         use_depth = args.train_depth
         class TrainingConfig(GreppyConfig):
             IMAGE_CHANNEL_COUNT = 4 if use_depth else 3 # depth or RGB
+            TRAINED_ON_VARIANTS_NOT_COMPONENTS = args.variants_not_components
             MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if use_depth else np.array([123.7, 116.8, 103.9])
+            VARIANT_URIS = dataset_dict['variant_uris']
             COMPONENT_URIS = dataset_dict['component_uris']
-            NUM_CLASSES = 1 + len(dataset_dict['component_uris'])
+            NUM_CLASSES = (1 + len(dataset_dict['variant_uris'])) if args.variants_not_components else (1 + len(dataset_dict['component_uris']))
             IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
         config = TrainingConfig()
     else:
@@ -431,12 +468,14 @@ if __name__ == '__main__':
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
             IMAGE_CHANNEL_COUNT = 4 if use_depth else 3 # depth or RGB
+            TRAINED_ON_VARIANTS_NOT_COMPONENTS = args.variants_not_components
             MEAN_PIXEL = np.array([123.7, 116.8, 103.9,  0.0]) if use_depth and true else np.array([123.7, 116.8, 103.9])
+            VARIANT_URIS = dataset_dict['variant_uris']
             COMPONENT_URIS = dataset_dict['component_uris']
-            NUM_CLASSES = 1 + len(dataset_dict['component_uris'])
+            NUM_CLASSES = (1 + len(dataset_dict['variant_uris'])) if args.variants_not_components else (1 + len(dataset_dict['component_uris']))
             IS_STEREO_CAMERA = dataset_dict['camera']['is_stereo_camera']
         config = InferenceConfig()
-    assert config.NUM_CLASSES, 1 + len(config.COMPONENT_URIS)
+    assert config.NUM_CLASSES, (1 + len(dataset_dict['variant_uris'])) if args.variants_not_components else (1 + len(dataset_dict['component_uris']))
     config.display()
 
     # Create model
@@ -482,7 +521,7 @@ if __name__ == '__main__':
 
     # Train or evaluate
     if args.command == "train":
-        train(model, args.dataset)
+        train(model, args.dataset, args.variants_not_components)
     elif args.command == "infer":
         detect_and_infer_depth(model, args.dataset, image_path=args.image,
                                 depth_path=args.depth)
