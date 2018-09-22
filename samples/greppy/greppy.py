@@ -32,6 +32,10 @@ import datetime
 import numpy as np
 import skimage.draw
 import OpenEXR, Imath
+import random, shutil, glob
+
+# Automatically splits raw datasets between validation and training. Out of 100.
+DEFAULT_TRAINING_SPLIT = 80
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -94,6 +98,16 @@ class GreppyConfig(Config):
 #  Dataset
 ############################################################
 
+# Get a list of all possible scenes
+def _scene_prefixes(dataset_dir):
+    dataset_prefixes = []
+    for root, dirs, files in os.walk(dataset_dir):
+        # one mask json file per scene so we can get the prefixes from them
+        for filename in fnmatch.filter(files, '*masks.json'):
+            dataset_prefixes.append(filename[0:0-len('-masks.json')])
+    dataset_prefixes.sort()
+    return dataset_prefixes
+
 class GreppyDataset(utils.Dataset):
 
     # Subclass to turn this off
@@ -148,17 +162,6 @@ class GreppyDataset(utils.Dataset):
         depth_image = np.stack(channels, axis=-1)
         return depth_image
 
-
-    def subset_prefixes_list(self, dataset_dir):
-        print("Loading dataset ", dataset_dir)
-        dataset_prefixes = []
-        for root, dirs, files in os.walk(dataset_dir):
-            # one mask json file per scene so we can get the prefixes from them
-            for filename in fnmatch.filter(files, '*masks.json'):
-                dataset_prefixes.append(filename[0:0-len('-masks.json')])
-        dataset_prefixes.sort()
-        return dataset_prefixes
-
     # file_kind = componentMasks-left or variantMasks-left
     def load_exr(self, prefix_dir, prefix, file_kind, expected_height, expected_width):
         exr_file = OpenEXR.InputFile(os.path.join(prefix_dir,prefix+"-"+file_kind+".exr"))
@@ -199,7 +202,8 @@ class GreppyDataset(utils.Dataset):
         if self.__class__.IS_STEREO_CAMERA:
             filename_postfix = '-left'
 
-        dataset_prefixes = self.subset_prefixes_list(dataset_dir)
+        print("Loading dataset ", dataset_dir)
+        dataset_prefixes = _scene_prefixes(dataset_dir)
         assert len(dataset_prefixes) > 0
 
         for prefix in dataset_prefixes:
@@ -312,10 +316,36 @@ class GreppyDataset(utils.Dataset):
 ############################################################
 #  Training
 ############################################################
-def train(model, dataset, variants_not_components):
+def split_dataset_into_dirs(dataset, dataset_split):
+    training_dir = os.path.join(dataset, "training")
+    validation_dir = os.path.join(dataset, "validation")
+    if not os.path.isdir(training_dir):
+        os.mkdir(training_dir)
+    if not os.path.isdir(validation_dir):
+        os.mkdir(validation_dir)
+    scene_prefixes = _scene_prefixes(dataset)
+    random.shuffle(scene_prefixes)
+    split_index = int(len(scene_prefixes) * dataset_split/100.00)
+    training_prefixes = scene_prefixes[0:split_index]
+    validation_prefixes = scene_prefixes[split_index:]
+    print("Moving", len(training_prefixes), "scenes into training, and", len(validation_prefixes), "into validation.")
+    for prefix in training_prefixes:
+        for scene_file in glob.glob(os.path.join(dataset, prefix+'-*')):
+            shutil.move(scene_file, training_dir)
+    for prefix in validation_prefixes:
+        for scene_file in glob.glob(os.path.join(dataset, prefix+'-*')):
+            shutil.move(scene_file, validation_dir)
+
+def train(model, dataset, variants_not_components, dataset_split):
     """Train the model."""
     class VariantsOrNotGreppyDataset(GreppyDataset):
         SHOULD_TRAIN_VARIANTS_NOT_COMPONENTS = variants_not_components
+
+    # look for training and validation folders as signals for
+    # the dataset already being split.  if not existant, split the dataset
+    # into the folders
+    if not os.path.isdir(os.path.join(dataset, "training")) or not os.path.isdir(os.path.join(dataset, "validation")):
+        split_dataset_into_dirs(dataset, dataset_split)
 
     # Training dataset.
     dataset_train = VariantsOrNotGreppyDataset()
@@ -417,6 +447,9 @@ if __name__ == '__main__':
     parser.add_argument('--componentsnotvariants', dest='variants_not_components', action='store_false',
         help="Enable components training rather than variants (default: use components not variants)")
     parser.set_defaults(variants_not_components=False)
+    parser.add_argument('--splittraining', required=False, type=int,
+                        metavar="80", default=DEFAULT_TRAINING_SPLIT,
+                        help='split off the training set from the validation at this percentage')
     parser.add_argument('--weights', required=True,
                         metavar="/path/to/weights.h5",
                         help="Path to weights .h5 file or 'coco'")
@@ -521,7 +554,7 @@ if __name__ == '__main__':
 
     # Train or evaluate
     if args.command == "train":
-        train(model, args.dataset, args.variants_not_components)
+        train(model, args.dataset, args.variants_not_components, args.splittraining)
     elif args.command == "infer":
         detect_and_infer_depth(model, args.dataset, image_path=args.image,
                                 depth_path=args.depth)
