@@ -12,13 +12,13 @@ Usage: import the module (see Jupyter notebooks for examples), or run from
        the command line as such:
 
     # Train a new model starting from pre-trained COCO weights
-    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=coco --traindepth --variantsnotcomponents
+    python3 greppy.py train --dataset=/path/to/greppymetaverse/dataset --weights=coco --traindepth --variantsnotcomponents
 
     # Resume training a model that you had trained earlier
-    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=last --traindepth --variantsnotcomponents
+    python3 greppy.py train --dataset=/path/to/greppymetaverse/dataset --weights=last --traindepth --variantsnotcomponents
 
     # Train a new model starting from ImageNet weights
-    python3 greppy.py train --dataset=/path/to/balloon/dataset --weights=imagenet --traindepth --variantsnotcomponents
+    python3 greppy.py train --dataset=/path/to/greppymetaverse/dataset --weights=imagenet --traindepth --variantsnotcomponents
 
     # Run inference on an image
     python3 greppy.py infer --weights=/path/to/weights/file.h5 --image=<URL or path to file> --depth=<URL or path to file> --variantsnotcomponents
